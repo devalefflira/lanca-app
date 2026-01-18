@@ -13,7 +13,7 @@ export default function RelatorioFornecedor() {
 
   const { data: contas = [], isLoading } = useQuery({
     queryKey: ['contas-relatorio-fornecedor'],
-    queryFn: () => base44.entities.ContaPagar.list('-created_at'),
+    queryFn: () => base44.entities.ContaPagar.list('nome_fornecedor', 1000),
   });
 
   // Group by supplier

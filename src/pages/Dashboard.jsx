@@ -32,7 +32,7 @@ const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'
 export default function Dashboard() {
   const { data: contas = [], isLoading } = useQuery({
     queryKey: ['contas-dashboard'],
-    queryFn: () => base44.entities.ContaPagar.list('-created_at', 1000),
+    queryFn: () => base44.entities.ContaPagar.list('-created_date', 1000),
   });
 
   const { data: tiposDocumento = [] } = useQuery({

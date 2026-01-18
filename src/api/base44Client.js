@@ -1,15 +1,19 @@
 import { supabase } from '@/lib/supabase';
 
-// Função auxiliar (pode manter a que já existe)
+// Função auxiliar para criar o CRUD genérico
 const createCrud = (table) => ({
-  list: async (orderBy = 'created_at') => {
-    // ... (código existente do createCrud)
+  list: async (orderBy = 'created_at', limit = 100) => {
     let query = supabase.from(table).select('*');
+    
+    // Lógica de ordenação padrão
     if (orderBy.startsWith('-')) {
-        query = query.order(orderBy.substring(1), { ascending: false });
+      query = query.order(orderBy.substring(1), { ascending: false });
     } else {
-        query = query.order(orderBy, { ascending: true });
+      query = query.order(orderBy, { ascending: true });
     }
+    
+    if (limit) query = query.limit(limit);
+
     const { data, error } = await query;
     if (error) throw error;
     return data;
@@ -37,16 +41,21 @@ export const base44 = {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
       return data;
+    },
+    me: async () => {
+      const { data: { user }, error } = await supabase.auth.getUser();
+      if (error) throw error;
+      return user; 
     }
   },
   entities: {
-    // --- AQUI ESTÁ A CORREÇÃO PARA EXIBIR OS NOMES ---
+    // --- CONTA PAGAR (COM JOIN E ORDENAÇÃO CORRETA) ---
     ContaPagar: {
       ...createCrud('tb_contas_pagar'),
       
-      // Sobrescreve o LIST para trazer os dados conectados (JOIN)
-      list: async () => {
-        const { data, error } = await supabase
+      // Sobrescreve o LIST para trazer os dados conectados
+      list: async (orderBy = '-created_at', limit = 500) => {
+        let query = supabase
           .from('tb_contas_pagar')
           .select(`
             *,
@@ -55,20 +64,29 @@ export const base44 = {
             tb_razoes ( descricao ),
             tb_parcelas ( descricao ),
             tb_tipos_documento ( descricao )
-          `)
-          .order('id', { ascending: false }); // Mudei para ID para evitar erro se created_at faltar
+          `);
+
+        // Aplica a ordenação solicitada pela tela
+        if (orderBy.startsWith('-')) {
+            query = query.order(orderBy.substring(1), { ascending: false });
+        } else {
+            query = query.order(orderBy, { ascending: true });
+        }
+
+        if (limit) query = query.limit(limit);
         
+        const { data, error } = await query;
         if (error) throw error;
         return data;
       }
     },
-    // ------------------------------------------------
     
     Fornecedor: createCrud('tb_fornecedores'),
     Banco: createCrud('tb_bancos'),
     TipoDocumento: createCrud('tb_tipos_documento'),
     Razao: createCrud('tb_razoes'),
     Usuario: createCrud('tb_usuarios'),
-    Parcela: createCrud('tb_parcelas')
+    Parcela: createCrud('tb_parcelas'),
+    StatusConta: createCrud('tb_status') // Caso você use a tabela de status futuramente
   }
 };

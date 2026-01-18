@@ -1,288 +1,409 @@
-import React, { useState } from 'react';
-import * as XLSX from 'xlsx';
+import React, { useState, useEffect } from 'react';
 import { base44 } from '@/api/base44Client';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
+import { parseISO, isWithinInterval, format } from 'date-fns';
+import { ptBR } from 'date-fns/locale';
 import {
-  Plus, Upload, Download, Trash2, Edit, CheckCircle, AlertCircle, X
-} from 'lucide-react';
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Card } from "@/components/ui/card";
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import NovaContaModal from '@/components/contas/NovaContaModal';
+import { Badge } from "@/components/ui/badge";
+import { Pencil, Trash2, Plus, Loader2, Upload, Download } from 'lucide-react';
+import PageHeader from '@/components/shared/PageHeader';
+import DeleteConfirmDialog from '@/components/shared/DeleteConfirmDialog';
+import ContaModal from '@/components/contas/ContaModal';
+import ContaFilters from '@/components/contas/ContaFilters';
 import ImportExcel from '@/components/contas/ImportExcel';
+import ExportExcel from '@/components/contas/ExportExcel';
 import { formatCurrency, formatDate, getDayOfWeekShort } from '@/components/shared/formatters';
 
-export default function ContasPagar() {
-  const queryClient = useQueryClient();
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [isImportOpen, setIsImportOpen] = useState(false);
-  const [editingConta, setEditingConta] = useState(null);
+const initialFilters = {
+  dataInicio: '',
+  dataFim: '',
+  fornecedor: '',
+  valorMin: '',
+  valorMax: '',
+  tipoDocumento: '',
+  notaFiscal: '',
+  numeroDocumento: ''
+};
 
-  // --- ESTADO DOS FILTROS ---
-  const [filters, setFilters] = useState({
-    dataInicio: '',
-    dataFim: '',
-    busca: '',
-    minValor: '',
-    maxValor: ''
-  });
+const ITEMS_PER_PAGE = 100;
+
+export default function ContasPagar() {
+  const [modalOpen, setModalOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [editingItem, setEditingItem] = useState(null);
+  const [filters, setFilters] = useState(initialFilters);
+  const [userRole, setUserRole] = useState('user');
+  const [currentPage, setCurrentPage] = useState(1);
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    const loadUser = async () => {
+      try {
+        const user = await base44.auth.me();
+        setUserRole(user?.role || 'user');
+      } catch (e) {
+        setUserRole('user');
+      }
+    };
+    loadUser();
+  }, []);
 
   const { data: contas = [], isLoading } = useQuery({
     queryKey: ['contas-pagar'],
-    queryFn: () => base44.entities.ContaPagar.list(),
+    queryFn: () => base44.entities.ContaPagar.list('-data_vencimento', 500),
   });
 
-  // --- LÓGICA DE FILTRAGEM (Frontend) ---
-  const contasFiltradas = contas.filter(conta => {
-    // Filtro de Data
-    const dataVenc = conta.data_vencimento?.split('T')[0];
-    if (filters.dataInicio && dataVenc < filters.dataInicio) return false;
-    if (filters.dataFim && dataVenc > filters.dataFim) return false;
-
-    // Filtro de Valor
-    if (filters.minValor && Number(conta.valor_original) < Number(filters.minValor)) return false;
-    if (filters.maxValor && Number(conta.valor_original) > Number(filters.maxValor)) return false;
-
-    // Filtro de Texto (Fornecedor, Doc ou NF)
-    if (filters.busca) {
-      const busca = filters.busca.toLowerCase();
-      const fornecedor = conta.tb_fornecedores?.nome_razao?.toLowerCase() || '';
-      const doc = conta.numero_documento?.toLowerCase() || '';
-      const nf = conta.nota_fiscal?.toLowerCase() || '';
-      if (!fornecedor.includes(busca) && !doc.includes(busca) && !nf.includes(busca)) return false;
-    }
-
-    return true;
-  });
-
-  // --- EXPORTAR ---
-  const handleExport = () => {
-    if (contasFiltradas.length === 0) return toast.warning("Sem dados para exportar.");
-    const dadosFormatados = contasFiltradas.map(c => ({
-      Vencimento: formatDate(c.data_vencimento),
-      Fornecedor: c.tb_fornecedores?.nome_razao || 'N/A',
-      Valor: c.valor_original,
-      Status: c.status,
-      Tipo: c.tb_tipos_documento?.descricao || '-',
-      Banco: c.tb_bancos?.nome_banco || '-',
-      Obs: c.observacao
-    }));
-    const ws = XLSX.utils.json_to_sheet(dadosFormatados);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Contas");
-    XLSX.writeFile(wb, "Contas_a_Pagar.xlsx");
-  };
-
-  // --- IMPORTAR ---
-  const importMutation = useMutation({
-    mutationFn: async (dadosExcel) => {
-      const promises = dadosExcel.map(linha => base44.entities.ContaPagar.create({
-           valor_original: linha['Valor'] || 0,
-           observacao: `Importado: ${linha['Fornecedor'] || ''}`,
-           status: 'Pendente'
-      }));
-      await Promise.all(promises);
-    },
+  const createMutation = useMutation({
+    mutationFn: (data) => base44.entities.ContaPagar.create(data),
     onSuccess: () => {
-      queryClient.invalidateQueries(['contas-pagar']);
-      toast.success("Dados importados!");
-      setIsImportOpen(false);
-    }
+      queryClient.invalidateQueries({ queryKey: ['contas-pagar'] });
+      queryClient.invalidateQueries({ queryKey: ['contas-dashboard'] });
+      toast.success('Conta cadastrada com sucesso!');
+    },
   });
 
-  // --- SALVAR/EDITAR ---
-  const saveMutation = useMutation({
-    mutationFn: (dados) => {
-      if (editingConta) return base44.entities.ContaPagar.update(editingConta.id, dados);
-      return base44.entities.ContaPagar.create(dados);
-    },
+  const updateMutation = useMutation({
+    mutationFn: ({ id, data }) => base44.entities.ContaPagar.update(id, data),
     onSuccess: () => {
-      queryClient.invalidateQueries(['contas-pagar']);
-      toast.success(editingConta ? 'Atualizado!' : 'Criado!');
-      setIsModalOpen(false);
-      setEditingConta(null);
+      queryClient.invalidateQueries({ queryKey: ['contas-pagar'] });
+      queryClient.invalidateQueries({ queryKey: ['contas-dashboard'] });
+      toast.success('Conta atualizada com sucesso!');
     },
-    onError: (e) => toast.error("Erro ao salvar: " + (e.message || "Verifique os dados."))
-  });
-
-  const updateStatusMutation = useMutation({
-    mutationFn: ({ id, novoStatus }) => base44.entities.ContaPagar.update(id, { status: novoStatus }),
-    onSuccess: () => queryClient.invalidateQueries(['contas-pagar'])
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id) => base44.entities.ContaPagar.delete(id),
-    onSuccess: () => queryClient.invalidateQueries(['contas-pagar'])
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['contas-pagar'] });
+      queryClient.invalidateQueries({ queryKey: ['contas-dashboard'] });
+      toast.success('Conta excluída com sucesso!');
+      setDeleteOpen(false);
+      setEditingItem(null);
+    },
   });
 
-  // Totais Visuais
-  const totalRegistros = contasFiltradas.length;
-  const valorTotal = contasFiltradas.reduce((acc, curr) => acc + (Number(curr.valor_original) || 0), 0);
+  const closeModal = () => {
+    setModalOpen(false);
+    setEditingItem(null);
+  };
+
+  const handleEdit = (item) => {
+    setEditingItem(item);
+    setModalOpen(true);
+  };
+
+  const handleDelete = (item) => {
+    setEditingItem(item);
+    setDeleteOpen(true);
+  };
+
+  const handleSave = async (formData, andNew) => {
+    if (!formData.data_vencimento) {
+      toast.error('Data de vencimento é obrigatória');
+      return;
+    }
+    if (!formData.id_fornecedor) {
+      toast.error('Fornecedor é obrigatório');
+      return;
+    }
+    if (!formData.valor_original || formData.valor_original <= 0) {
+      toast.error('Valor deve ser maior que zero');
+      return;
+    }
+
+    if (editingItem) {
+      await updateMutation.mutateAsync({ id: editingItem.id, data: formData });
+    } else {
+      await createMutation.mutateAsync(formData);
+    }
+
+    if (!andNew) {
+      closeModal();
+    }
+  };
+
+  // Filter logic
+  const filteredContas = contas.filter(conta => {
+    if (filters.dataInicio || filters.dataFim) {
+      const dataVenc = conta.data_vencimento ? parseISO(conta.data_vencimento) : null;
+      if (dataVenc) {
+        if (filters.dataInicio && dataVenc < parseISO(filters.dataInicio)) return false;
+        if (filters.dataFim && dataVenc > parseISO(filters.dataFim)) return false;
+      }
+    }
+
+    if (filters.fornecedor && conta.id_fornecedor !== filters.fornecedor) return false;
+    if (filters.tipoDocumento && conta.id_tipo_documento !== filters.tipoDocumento) return false;
+
+    if (filters.valorMin && conta.valor_original < filters.valorMin) return false;
+    if (filters.valorMax && conta.valor_original > filters.valorMax) return false;
+
+    if (filters.notaFiscal && !conta.nota_fiscal?.toLowerCase().includes(filters.notaFiscal.toLowerCase())) return false;
+    if (filters.numeroDocumento && !conta.numero_documento?.toLowerCase().includes(filters.numeroDocumento.toLowerCase())) return false;
+
+    return true;
+  });
+
+  // Pagination
+  const totalPages = Math.ceil(filteredContas.length / ITEMS_PER_PAGE);
+  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+  const paginatedContas = filteredContas.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filters]);
+
+  const getPageNumbers = () => {
+    const pages = [];
+    const maxVisible = 9;
+    
+    if (totalPages <= maxVisible) {
+      for (let i = 1; i <= totalPages; i++) pages.push(i);
+    } else {
+      const start = Math.max(1, currentPage - 4);
+      const end = Math.min(totalPages, start + maxVisible - 1);
+      
+      for (let i = start; i <= end; i++) pages.push(i);
+    }
+    return pages;
+  };
+
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'Pago': return 'bg-green-100 text-green-700';
+      case 'Pendente': return 'bg-amber-100 text-amber-700';
+      case 'Cancelado': return 'bg-red-100 text-red-700';
+      default: return 'bg-slate-100 text-slate-700';
+    }
+  };
 
   return (
-    <div className="space-y-6">
-      {/* CABEÇALHO */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+    <div>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">Contas a Pagar</h1>
-          <p className="text-slate-500">Gerencie todas as contas a pagar</p>
+          <p className="text-slate-500 mt-1">Gerencie todas as contas a pagar</p>
         </div>
-        <div className="flex gap-2">
-           <Button variant="outline" className="gap-2" onClick={() => setIsImportOpen(true)}>
-             <Upload className="w-4 h-4"/> Importar Excel
-           </Button>
-           <Button variant="outline" className="gap-2" onClick={handleExport}>
-             <Download className="w-4 h-4"/> Exportar
-           </Button>
-           <Button onClick={() => { setEditingConta(null); setIsModalOpen(true); }} className="bg-blue-600 hover:bg-blue-700 gap-2">
-             <Plus className="w-4 h-4"/> Nova Conta
-           </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            onClick={() => setImportOpen(true)}
+            className="gap-2"
+          >
+            <Upload className="w-4 h-4" />
+            Importar Excel
+          </Button>
+          <ExportExcel contas={filteredContas} isLoading={isLoading} />
+          <Button
+            onClick={() => setModalOpen(true)}
+            className="bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white shadow-lg shadow-blue-500/25"
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            Nova Conta
+          </Button>
         </div>
       </div>
 
-      <NovaContaModal 
-        open={isModalOpen}
-        onOpenChange={setIsModalOpen}
-        onSave={(dados) => saveMutation.mutate(dados)}
-        isLoading={saveMutation.isPending}
-        contaParaEditar={editingConta}
-      />
+      <ContaFilters filters={filters} setFilters={setFilters} />
 
-      <ImportExcel 
-        open={isImportOpen}
-        onOpenChange={setIsImportOpen}
-        onImport={(dados) => importMutation.mutate(dados)}
-        isLoading={importMutation.isPending}
-      />
-
-      {/* ÁREA DE FILTROS REINSERIDA AQUI */}
-      <Card className="p-4 bg-white shadow-sm border-slate-200">
-        <div className="flex flex-wrap gap-4 items-end">
-          <div className="w-full sm:w-auto flex gap-2">
-            <div className="space-y-1">
-                <span className="text-xs text-slate-500 ml-1">De</span>
-                <Input type="date" value={filters.dataInicio} onChange={e => setFilters({...filters, dataInicio: e.target.value})} className="w-40" />
-            </div>
-            <div className="space-y-1">
-                <span className="text-xs text-slate-500 ml-1">Até</span>
-                <Input type="date" value={filters.dataFim} onChange={e => setFilters({...filters, dataFim: e.target.value})} className="w-40" />
-            </div>
+      {isLoading ? (
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+        </div>
+      ) : (
+        <div className="rounded-xl border border-slate-200 overflow-hidden bg-white shadow-sm">
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-slate-50 hover:bg-slate-50">
+                  <TableHead className="font-semibold text-slate-700">Dia</TableHead>
+                  <TableHead className="font-semibold text-slate-700">Vencimento</TableHead>
+                  <TableHead className="font-semibold text-slate-700">Fornecedor</TableHead>
+                  <TableHead className="font-semibold text-slate-700">Tipo</TableHead>
+                  <TableHead className="font-semibold text-slate-700">Nº Doc</TableHead>
+                  <TableHead className="font-semibold text-slate-700">NF</TableHead>
+                  <TableHead className="font-semibold text-slate-700">Parcela</TableHead>
+                  <TableHead className="font-semibold text-slate-700">Razão</TableHead>
+                  <TableHead className="font-semibold text-slate-700">Banco</TableHead>
+                  <TableHead className="font-semibold text-slate-700">Status</TableHead>
+                  <TableHead className="font-semibold text-slate-700 text-right">Valor</TableHead>
+                  <TableHead className="font-semibold text-slate-700">Tags</TableHead>
+                  <TableHead className="font-semibold text-slate-700 text-right w-24">Ações</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {paginatedContas.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={13} className="text-center py-12 text-slate-400">
+                      Nenhuma conta encontrada
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  paginatedContas.map((conta) => (
+                    <TableRow key={conta.id} className="hover:bg-slate-50/50">
+                      <TableCell className="capitalize">
+                        {getDayOfWeekShort(conta.data_competencia || conta.data_vencimento)}
+                      </TableCell>
+                      <TableCell>{formatDate(conta.data_vencimento)}</TableCell>
+                      <TableCell className="font-medium max-w-[150px] truncate">
+                        {conta.nome_fornecedor || '-'}
+                      </TableCell>
+                      <TableCell>{conta.tipo_documento || '-'}</TableCell>
+                      <TableCell>{conta.numero_documento || '-'}</TableCell>
+                      <TableCell>{conta.nota_fiscal || '-'}</TableCell>
+                      <TableCell>{conta.parcela || '-'}</TableCell>
+                      <TableCell>{conta.razao || '-'}</TableCell>
+                      <TableCell>{conta.banco || '-'}</TableCell>
+                      <TableCell>
+                        <Badge className={getStatusColor(conta.status)}>
+                          {conta.status || 'Pendente'}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right font-medium text-emerald-600">
+                        {formatCurrency(conta.valor_original)}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-1 max-w-[120px]">
+                          {conta.tags?.slice(0, 2).map((tag, idx) => (
+                            <Badge key={idx} variant="outline" className="text-xs">
+                              {tag}
+                            </Badge>
+                          ))}
+                          {conta.tags?.length > 2 && (
+                            <Badge variant="outline" className="text-xs">
+                              +{conta.tags.length - 2}
+                            </Badge>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleEdit(conta)}
+                            className="h-8 w-8 text-slate-500 hover:text-blue-600 hover:bg-blue-50"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </Button>
+                          {userRole === 'admin' && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleDelete(conta)}
+                              className="h-8 w-8 text-slate-500 hover:text-red-600 hover:bg-red-50"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </Button>
+                          )}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
           </div>
+        </div>
+      )}
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="mt-4 flex flex-wrap items-center justify-center gap-1">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setCurrentPage(1)}
+            disabled={currentPage === 1}
+            className="text-xs"
+          >
+            Primeira
+          </Button>
           
-          <div className="flex-1 min-w-[200px] space-y-1">
-            <span className="text-xs text-slate-500 ml-1">Buscar</span>
-            <Input 
-                placeholder="Fornecedor, NF ou Doc..." 
-                value={filters.busca}
-                onChange={e => setFilters({...filters, busca: e.target.value})}
-            />
-          </div>
-
-          <div className="w-full sm:w-auto flex gap-2">
-             <div className="space-y-1">
-                <span className="text-xs text-slate-500 ml-1">Min R$</span>
-                <Input type="number" placeholder="0,00" value={filters.minValor} onChange={e => setFilters({...filters, minValor: e.target.value})} className="w-24" />
-             </div>
-             <div className="space-y-1">
-                <span className="text-xs text-slate-500 ml-1">Max R$</span>
-                <Input type="number" placeholder="0,00" value={filters.maxValor} onChange={e => setFilters({...filters, maxValor: e.target.value})} className="w-24" />
-             </div>
-          </div>
-
-          <Button variant="ghost" className="text-slate-500 gap-2" onClick={() => setFilters({dataInicio:'', dataFim:'', busca:'', minValor:'', maxValor:''})}>
-            <X className="w-4 h-4" /> Limpar Filtros
+          {getPageNumbers().map((page) => (
+            <Button
+              key={page}
+              variant={currentPage === page ? "default" : "outline"}
+              size="sm"
+              onClick={() => setCurrentPage(page)}
+              className={`w-9 text-xs ${currentPage === page ? 'bg-blue-600 hover:bg-blue-700' : ''}`}
+            >
+              {page}
+            </Button>
+          ))}
+          
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+            disabled={currentPage === totalPages}
+            className="text-xs"
+          >
+            Próxima
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setCurrentPage(totalPages)}
+            disabled={currentPage === totalPages}
+            className="text-xs"
+          >
+            Última
           </Button>
         </div>
-      </Card>
+      )}
 
-      {/* TABELA COM DADOS CONECTADOS */}
-      <Card className="overflow-hidden border-slate-200 shadow-sm">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm text-left">
-            <thead className="bg-slate-50 text-slate-600 font-medium border-b border-slate-200">
-              <tr>
-                <th className="py-3 px-4">Dia</th>
-                <th className="py-3 px-4">Vencimento</th>
-                <th className="py-3 px-4">Fornecedor</th>
-                <th className="py-3 px-4">Tipo</th>
-                <th className="py-3 px-4">Nº Doc</th>
-                <th className="py-3 px-4">NF</th>
-                <th className="py-3 px-4">Parcela</th>
-                <th className="py-3 px-4">Razão</th>
-                <th className="py-3 px-4">Banco</th>
-                <th className="py-3 px-4">Status</th>
-                <th className="py-3 px-4 text-right">Valor</th>
-                <th className="py-3 px-4 text-center">Ações</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {contasFiltradas.length === 0 && (
-                <tr><td colSpan={12} className="py-8 text-center text-slate-500">Nenhum registro encontrado.</td></tr>
-              )}
-              {contasFiltradas.map((conta) => (
-                <tr key={conta.id} className="hover:bg-slate-50 transition-colors group">
-                  <td className="py-3 px-4 font-medium text-slate-700">{getDayOfWeekShort(conta.data_vencimento)}</td>
-                  <td className="py-3 px-4 text-slate-600">{formatDate(conta.data_vencimento)}</td>
-                  
-                  {/* AQUI ESTÁ O SEGREDO: Usamos o objeto aninhado (join) */}
-                  <td className="py-3 px-4 font-medium text-slate-900">
-                    {conta.tb_fornecedores?.nome_razao || conta.tb_fornecedores?.nome_fantasia || '-'}
-                  </td>
-                  <td className="py-3 px-4 text-slate-600">
-                    {conta.tb_tipos_documento?.descricao || '-'}
-                  </td>
-                  
-                  <td className="py-3 px-4 text-slate-500">{conta.numero_documento || '-'}</td>
-                  <td className="py-3 px-4 text-slate-500">{conta.nota_fiscal || '-'}</td>
-                  
-                  <td className="py-3 px-4 text-slate-500">
-                     {conta.tb_parcelas?.descricao || 'Única'}
-                  </td>
-                  
-                  <td className="py-3 px-4 text-slate-600">
-                     {conta.tb_razoes?.descricao || '-'}
-                  </td>
-                  <td className="py-3 px-4 text-slate-600">
-                     {conta.tb_bancos?.nome_banco || '-'}
-                  </td>
-
-                  <td className="py-3 px-4">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <span className={`px-2 py-1 rounded-full text-xs font-semibold cursor-pointer select-none flex w-fit items-center gap-1 ${conta.status === 'Pago' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                          {conta.status === 'Pago' ? <CheckCircle className="w-3 h-3"/> : <AlertCircle className="w-3 h-3"/>}
-                          {conta.status || 'Pendente'}
-                        </span>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="bg-white">
-                        <DropdownMenuItem onClick={() => updateStatusMutation.mutate({id: conta.id, novoStatus: 'Pendente'})}>Pendente</DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => updateStatusMutation.mutate({id: conta.id, novoStatus: 'Pago'})}>Pago</DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </td>
-                  <td className="py-3 px-4 text-right font-bold text-slate-700">{formatCurrency(conta.valor_original)}</td>
-                  <td className="py-3 px-4 text-center">
-                    <div className="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <Button variant="ghost" size="icon" className="h-8 w-8 text-blue-600" onClick={() => { setEditingConta(conta); setIsModalOpen(true); }}><Edit className="w-4 h-4"/></Button>
-                      <Button variant="ghost" size="icon" className="h-8 w-8 text-red-600" onClick={() => { if(window.confirm('Excluir?')) deleteMutation.mutate(conta.id); }}><Trash2 className="w-4 h-4"/></Button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="bg-slate-50 p-4 border-t border-slate-200 flex justify-between items-center text-sm text-slate-600">
-            <div>Mostrando {contasFiltradas.length} registros</div>
-            <div className="flex gap-4 font-semibold">
-                <span>Total Filtrado: {formatCurrency(valorTotal)}</span>
+      {/* Summary */}
+      {filteredContas.length > 0 && (
+        <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-wrap gap-6 justify-between items-center">
+          <div className="text-sm text-slate-500">
+            Mostrando {startIndex + 1} - {Math.min(startIndex + ITEMS_PER_PAGE, filteredContas.length)} de {filteredContas.length}
+          </div>
+          <div className="flex gap-6">
+            <div>
+              <span className="text-sm text-slate-500">Registros:</span>
+              <span className="ml-2 font-semibold text-slate-700">{filteredContas.length}</span>
             </div>
+            <div>
+              <span className="text-sm text-slate-500">Total:</span>
+              <span className="ml-2 font-semibold text-emerald-600">
+                {formatCurrency(filteredContas.reduce((sum, c) => sum + (c.valor_original || 0), 0))}
+              </span>
+            </div>
+          </div>
         </div>
-      </Card>
+      )}
+
+      <ContaModal
+        open={modalOpen}
+        onClose={closeModal}
+        editingItem={editingItem}
+        onSave={handleSave}
+        isLoading={createMutation.isPending || updateMutation.isPending}
+      />
+
+      <DeleteConfirmDialog
+        open={deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        onConfirm={() => deleteMutation.mutate(editingItem?.id)}
+        isLoading={deleteMutation.isPending}
+      />
+
+      <ImportExcel
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+      />
     </div>
   );
 }

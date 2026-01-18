@@ -16,40 +16,36 @@ export default function Parcelas() {
   const [form, setForm] = useState({ descricao: '' });
   const queryClient = useQueryClient();
 
-  // Busca dados
   const { data: parcelas = [], isLoading } = useQuery({
     queryKey: ['parcelas'],
     queryFn: () => base44.entities.Parcela.list('descricao'),
   });
 
-  // Criar
   const createMutation = useMutation({
     mutationFn: (data) => base44.entities.Parcela.create(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['parcelas'] });
-      toast.success('Parcela criada com sucesso!');
+      toast.success('Parcela cadastrada com sucesso!');
       closeModal();
     },
-    onError: () => toast.error('Erro ao criar parcela.')
   });
 
-  // Atualizar
   const updateMutation = useMutation({
     mutationFn: ({ id, data }) => base44.entities.Parcela.update(id, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['parcelas'] });
-      toast.success('Parcela atualizada!');
+      toast.success('Parcela atualizada com sucesso!');
       closeModal();
     },
   });
 
-  // Deletar
   const deleteMutation = useMutation({
     mutationFn: (id) => base44.entities.Parcela.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['parcelas'] });
-      toast.success('Parcela removida!');
+      toast.success('Parcela excluída com sucesso!');
       setDeleteOpen(false);
+      setEditingItem(null);
     },
   });
 
@@ -59,9 +55,18 @@ export default function Parcelas() {
     setForm({ descricao: '' });
   };
 
+  const handleEdit = (item) => {
+    setEditingItem(item);
+    setForm({ descricao: item.descricao || '' });
+    setModalOpen(true);
+  };
+
   const handleSave = () => {
-    if (!form.descricao) return toast.warning('Preencha a descrição');
-    
+    if (!form.descricao.trim()) {
+      toast.error('Descrição é obrigatória');
+      return;
+    }
+
     if (editingItem) {
       updateMutation.mutate({ id: editingItem.id, data: form });
     } else {
@@ -69,20 +74,26 @@ export default function Parcelas() {
     }
   };
 
+  const columns = [
+    { header: 'Descrição', accessor: 'descricao' }
+  ];
+
   return (
     <div>
-      <PageHeader 
-        title="Parcelas" 
-        subtitle="Gerencie as opções de parcelamento (ex: 01/12, Fixa)"
+      <PageHeader
+        title="Parcelas"
+        subtitle="Gerencie as parcelas (Ex: 01/01, 01/10)"
         onAdd={() => setModalOpen(true)}
+        addLabel="Nova Parcela"
       />
 
-      <DataTable 
-        columns={[{ header: 'Descrição', accessor: 'descricao' }]}
+      <DataTable
+        columns={columns}
         data={parcelas}
         isLoading={isLoading}
-        onEdit={(item) => { setEditingItem(item); setForm({ descricao: item.descricao }); setModalOpen(true); }}
+        onEdit={handleEdit}
         onDelete={(item) => { setEditingItem(item); setDeleteOpen(true); }}
+        emptyMessage="Nenhuma parcela cadastrada"
       />
 
       <CrudModal
@@ -92,11 +103,14 @@ export default function Parcelas() {
         onSave={handleSave}
         isLoading={createMutation.isPending || updateMutation.isPending}
       >
-        <div className="space-y-2">
-          <Label>Descrição (Ex: 01/12)</Label>
-          <Input 
-            value={form.descricao} 
-            onChange={e => setForm({...form, descricao: e.target.value})} 
+        <div>
+          <Label htmlFor="descricao">Descrição *</Label>
+          <Input
+            id="descricao"
+            value={form.descricao}
+            onChange={(e) => setForm({ descricao: e.target.value })}
+            placeholder="Ex: 01/01, 02/10"
+            className="mt-1"
           />
         </div>
       </CrudModal>
@@ -105,6 +119,7 @@ export default function Parcelas() {
         open={deleteOpen}
         onClose={() => setDeleteOpen(false)}
         onConfirm={() => deleteMutation.mutate(editingItem?.id)}
+        isLoading={deleteMutation.isPending}
       />
     </div>
   );
